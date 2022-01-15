@@ -4,7 +4,6 @@
 #
 
 import os
-# import time
 import mido
 import configparser
 import getopt
