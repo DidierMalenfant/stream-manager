@@ -22,26 +22,13 @@ from threading import Thread
 from time import sleep
 from mutagen import File as MutagenFile
 
+
 # -- Global variables
-next_track_title_string = None
-next_track_artist_string = None
-next_track_filename = None
-current_track_title_string = ''
-current_track_artist_string = ''
-current_track_filename = None
-track_file_collection = {}
+midi_client = None
+obs_client = None
+twitter_client = None
+traktor_client = None
 
-midi_input = None
-midi_output = None
-
-light_on = False
-
-obs = None
-obs_in_transition = False
-obs_scenes = []
-obs_stream_on = False
-
-# -- Configuration
 playing_track_title_filename = None
 playing_track_title_prefix = None
 playing_track_artist_filename = None
@@ -49,44 +36,503 @@ playing_track_artist_prefix = None
 playing_track_artwork_filename = None
 no_artwork_placeholder_filename = None
 
-input_device_name = None
-output_device_name = None
 
-traktor_collection_path = None
+# -- Classes
+class TwitterClient:
+    """Manage all our Twitter interactions."""
 
-new_track_available_channel = 0
-new_track_available_note = 0
-new_track_available_velocity = 0
+    def __init__(self, config):
+        """Initialize the client based on user configuration."""
 
-clear_current_track_channel = 0
-clear_current_track_note = 0
+        print('Setting up Twitter...')
 
-skip_next_track_channel = 0
-skip_next_track_note = 0
+        self.bearer_token = config['BearerToken']
+        self.consumer_key = config['ConsumerKey']
+        self.consumer_secret = config['ConsumerSecret']
+        self.access_token = config['AccessToken']
+        self.access_token_secret = config['AccessTokenSecret']
+        self.stream_start_text = config['StreamStartText']
+        self.stream_stop_text = config['StreamStopText']
+        self.track_update_text = config['TrackUpdateText']
 
-obs_server_address = None
-obs_server_port = 0
-obs_server_password = None
-obs_scene_selection_notes = []
-obs_current_scene_channel = 0
-obs_current_scene_velocity = 0
-obs_current_scene_index = 0
-obs_stream_status_note = 0
-obs_stream_status_channel = 0
-obs_stream_status_on_velocity = 0
-obs_stream_status_off_velocity = 0
+        self.twitter_api = tweepy.Client(bearer_token=self.bearer_token, consumer_key=self.consumer_key,
+                                         consumer_secret=self.consumer_secret, access_token=self.access_token,
+                                         access_token_secret=self.access_token_secret)
 
-twitter_client = None
-twitter_bearer_token = None
-twitter_consumer_key = None
-twitter_consumer_secret = None
-twitter_access_token = None
-twitter_access_token_secret = None
-twitter_stream_start_text = None
-twitter_stream_stop_text = None
-twitter_track_update_text = None
+    def tweet(self, text, media_id=None):
+        """Tweet some text."""
+        if self.twitter_api is None:
+            return
+
+        # -- Update the status
+        print(f'Tweet!: {text}')
+        if media_id is None:
+            self.twitter_api.create_tweet(text=text)
+        else:
+            self.twitter_api.create_tweet(text=text, media_ids=[media_id])
+
+    def tweet_start_text(self):
+        """Tweet the stream start text."""
+        self.tweet(self.twitter_stream_start_text)
+
+    def tweet_stop_text(self):
+        """Tweet the stream strop text."""
+        self.tweet(self.twitter_stream_stop_text)
+
+    def update_status(self, title, artist):
+        """Tweet the currently playing track."""
+        # global playing_track_artwork_filename
+
+        if len(title) == 0 or len(artist) == 0:
+            return
+
+        update_message = self.track_update_text.replace('{title}', title)
+        update_message = update_message.replace('{artist}', artist)
+
+        # media_id = None
+
+        # if os.path.exists(playing_track_artwork_filename):
+        #    base = os.path.splitext(playing_track_artwork_filename)[0]
+        #    extension = imghdr.what(playing_track_artwork_filename)
+
+        #    new_playing_track_artwork_filename = base + '.' + extension
+
+        #    with open(playing_track_artwork_filename, 'rb') as file:
+        #        media_id = API.simple_upload(new_playing_track_artwork_filename,
+        # file)
+
+        self.tweet(update_message)
 
 
+class MidiClient:
+    """Manage all our Midi interactions."""
+
+    def __init__(self, config):
+        print('Setting up midi...')
+
+        self.midi_input = None
+        self.midi_output = None
+
+        input_device_name = config['InputDeviceName']
+        if input_device_name is not None:
+            for device_name in mido.get_input_names():
+                if device_name == input_device_name:
+                    self.midi_input = mido.open_input(device_name, callback=self.on_midi_msg)
+                    print(f'Input: {device_name}')
+                    break
+
+        if self.midi_input is None:
+            print(f'Can\'t open midi input device {input_device_name}')
+
+        output_device_name = config['OutputDeviceName']
+        if output_device_name is not None:
+            for device_name in mido.get_output_names():
+                if device_name == output_device_name:
+                    self.midi_output = mido.open_output(device_name)
+                    print(f'Output: {device_name}')
+                    break
+
+        if self.midi_output is None:
+            print(f'Can\'t open midi output device {output_device_name}')
+
+        self.notes_currently_on = []
+        self.note_on_callbacks = {}
+
+    def add_callback(self, channel, note, callback):
+        existing_callbacks_for_channel = self.note_on_callbacks.get(channel, {})
+
+        existing_callbacks_for_channel[note] = callback
+        self.note_on_callbacks[channel] = existing_callbacks_for_channel
+
+    def on_midi_msg(self, message):
+        if(message.type != 'note_on'):
+            return
+
+        existing_callbacks_for_channel = self.note_on_callbacks.get(message.channel, None)
+        if existing_callbacks_for_channel is None:
+            return
+
+        callback = existing_callbacks_for_channel.get(message.note, None)
+        if callback is None:
+            return
+
+        callback(message.channel, message.note)
+
+    def note_on(self, note, channel, velocity):
+        if self.midi_output is None:
+            return
+
+        self.midi_output.send(mido.Message('note_on', channel=channel, note=note, velocity=velocity))
+
+        note_channel_combo = [note, channel]
+        if note_channel_combo not in self.notes_currently_on:
+            self.notes_currently_on.append(note_channel_combo)
+
+    def note_off(self, note, channel):
+        if self.midi_output is None:
+            return
+
+        self.midi_output.send(mido.Message('note_off', channel=channel, note=note))
+
+        note_channel_combo = [note, channel]
+        if note_channel_combo in self.notes_currently_on:
+            self.notes_currently_on.remove(note_channel_combo)
+
+    def shutdown(self):
+        print('Shutting down midi...')
+
+        if self.midi_input is not None:
+            self.midi_input.close()
+
+        if self.midi_output is not None:
+            for note_channel_combo in self.notes_currently_on:
+                self.note_off(note_channel_combo[0], note_channel_combo[1])
+
+                # -- Give some time for the note off to be sent thru
+                sleep(5)
+
+            self.midi_output.close()
+
+
+class OBSClient:
+    """Manage all our OBS interactions."""
+
+    def __init__(self, config):
+        """Initialize the client based on user configuration."""
+        global midi_client
+
+        print('Setting up OBS...')
+
+        self.server_address = config['ObsServerAddress']
+        self.server_port = int(config['ObsServerPort'])
+        self.server_password = config['ObsServerPassword']
+        self.current_scene_channel = int(config['CurrentSceneChannel']) - 1
+        self.current_scene_velocity = int(config['CurrentSceneVelocity'])
+
+        self.scene_selection_notes = []
+        for note_as_string in config['SceneSelectionNotes'].split(','):
+            note = int(note_as_string)
+
+            self.scene_selection_notes.append(note)
+
+            midi_client.add_callback(self.current_scene_channel, note, self.set_current_scene)
+
+        self.stream_status_note = int(config['StreamStatusNote'])
+        self.stream_status_channel = int(config['StreamStatusChannel']) - 1
+        self.stream_status_on_velocity = int(config['StreamOnVelocity'])
+        self.stream_status_off_velocity = int(config['StreamOffVelocity'])
+
+        midi_client.add_callback(self.stream_status_channel,
+                                 self.stream_status_note,
+                                 self.toggle_stream_status)
+
+        self.obs = obswebsocket.obsws(self.server_address, self.server_port, self.server_password)
+        self.obs.register(self.on_transition, obswebsocket.events.TransitionBegin)
+        self.obs.register(self.on_scene_changed, obswebsocket.events.TransitionEnd)
+        self.obs.register(self.on_stream_started, obswebsocket.events.StreamStarted)
+        self.obs.register(self.on_stream_stopped, obswebsocket.events.StreamStopped)
+
+        try:
+            self.obs.connect()
+        except obswebsocket.exceptions.ConnectionFailure:
+            self.obs = None
+            return
+
+        # -- Get all the scenes
+        all_scenes = self.obs.call(obswebsocket.requests.GetSceneList())
+
+        self.scenes = []
+        for scene in all_scenes.getScenes():
+            self.scenes.append(scene['name'])
+
+        # -- Update the current scene
+        self.update_current_scene_index()
+        self.set_current_scene_note(True)
+
+        # -- Update the initial stream status
+        status = self.obs.call(obswebsocket.requests.GetStreamingStatus())
+        self.stream_on = status.getStreaming()
+
+        self.in_transition = False
+
+        self.update_stream_status_note()
+
+    def update_current_scene_index(self):
+        current_scene = self.obs.call(obswebsocket.requests.GetCurrentScene())
+        self.current_scene_index = self.scenes.index(current_scene.getName())
+
+    def set_current_scene_note(self, on_or_off):
+        global midi_client
+
+        if on_or_off:
+            midi_client.note_on(channel=self.current_scene_channel,
+                                note=self.scene_selection_notes[self.current_scene_index],
+                                velocity=self.current_scene_velocity)
+        else:
+            midi_client.note_off(channel=self.current_scene_channel,
+                                 note=self.scene_selection_notes[self.current_scene_index])
+
+    def update_stream_status_note(self):
+        global midi_client
+
+        if self.stream_on:
+            midi_client.note_on(channel=self.stream_status_channel, note=self.stream_status_note,
+                                velocity=self.stream_status_on_velocity)
+        else:
+            midi_client.note_on(channel=self.stream_status_channel, note=self.stream_status_note,
+                                velocity=self.stream_status_off_velocity)
+
+    def start_streaming(self, channel, note):
+        print('Set Stream ON')
+        self.obs.call(obswebsocket.requests.StartStreaming())
+
+    def stop_streaming(self, channel, note):
+        print('Set Stream OFF')
+        self.obs.call(obswebsocket.requests.StopStreaming())
+
+    def toggle_stream_status(self, channel, note):
+        if self.stream_on:
+            self.stop_streaming()
+        else:
+            self.start_streaming()
+
+    def set_current_scene(self, channel, note):
+        if self.in_transition:
+            return
+
+        scene_index = self.scene_selection_notes.index(note)
+        if scene_index >= len(self.scenes):
+            return
+
+        self.obs.call(obswebsocket.requests.SetCurrentScene(self.scenes[scene_index]))
+
+    def on_transition(self, message):
+        self.in_transition = True
+
+    def do_obs_scene_changed(self):
+        self.set_current_scene_note(False)
+        self.update_current_scene_index()
+        self.set_current_scene_note(True)
+
+        self.in_transition = False
+
+    def on_scene_changed(self, message):
+        Thread(target=self.do_obs_scene_changed).start()
+
+    def on_stream_started(self, message):
+        global twitter_client
+
+        self.stream_on = True
+
+        self.update_stream_status_note()
+        twitter_client.tweet_start_text()
+
+        return
+
+    def on_stream_stopped(self, message):
+        global twitter_client
+
+        self.stream_on = False
+
+        self.update_stream_status_note()
+        twitter_client.tweet_stop_text()
+
+        return
+
+    def shutdown(self):
+        print('Shutting down obs...')
+
+        if self.obs is None:
+            return
+
+        self.obs.disconnect()
+
+
+class TraktorClient:
+    """Manage all our Traktor interactions."""
+
+    def __init__(self, config):
+        """Initialize the client based on user configuration."""
+        global midi_client
+
+        print('Setting up Traktor...')
+
+        self.collection_path = Path(config['CollectionFilename'])
+        self.new_track_available_channel = int(config['NewTrackAvailableChannel']) - 1
+        self.new_track_available_note = int(config['NewTrackAvailableNote'])
+        self.new_track_available_velocity = int(config['NewTrackAvailableVelocity'])
+        self.clear_current_track_channel = int(config['ClearCurrentTrackChannel']) - 1
+        self.clear_current_track_note = int(config['ClearCurrentTrackNote'])
+        self.skip_next_track_channel = int(config['SkipNextTrackChannel']) - 1
+        self.skip_next_track_note = int(config['SkipNextTrackNote'])
+        self.skip_next_track_velocity = int(config['SkipNextTrackVelocity'])
+
+        self.next_track_title_string = None
+        self.next_track_artist_string = None
+        self.next_track_filename = None
+        self.current_track_title_string = ''
+        self.current_track_artist_string = ''
+        self.current_track_filename = None
+        self.light_on = False
+        self.track_file_collection = {}
+
+        midi_client.add_callback(self.new_track_available_channel,
+                                 self.new_track_available_note,
+                                 self.new_track_available)
+        midi_client.add_callback(self.clear_current_track_channel,
+                                 self.clear_current_track_note,
+                                 self.clear_current_track)
+        midi_client.add_callback(self.skip_next_track_channel,
+                                 self.skip_next_track_note,
+                                 self.skip_next_track)
+
+    def update_meta(self, data):
+        info = dict(data)
+        title = info.get("title", "")
+        artist = info.get("artist", "")
+
+        if len(title) == 0 or len(artist) == 0:
+            return
+
+        track_string = f'{title}{artist}'
+        self.next_track_title_string = title
+        self.next_track_artist_string = artist
+
+        print(f'Available: {title} {artist}')
+
+        self.next_track_filename = self.track_file_collection.get(track_string, None)
+
+    def parse_collection(self):
+        print('Parsing Traktor collection...')
+
+        xml_root = xml_tree.ElementTree(file=self.collection_path).getroot()
+
+        for collection in xml_root.findall('COLLECTION'):
+            for entry in collection.findall('ENTRY'):
+                location = entry.find('LOCATION')
+
+                if location is None:
+                    continue
+
+                volume = location.get('VOLUME')
+
+                if volume is None:
+                    continue
+
+                directory = location.get('DIR')
+
+                if directory is None:
+                    continue
+
+                file = location.get('FILE')
+
+                if file is None:
+                    continue
+
+                filename = '/Volumes/' + volume + \
+                    directory.replace('/:', '/') + file
+
+                title = entry.get('TITLE')
+
+                if title is None:
+                    continue
+
+                artist = entry.get('ARTIST')
+
+                if artist is None:
+                    continue
+
+                key = f'{title}{artist}'
+
+                if key not in self.track_file_collection:
+                    self.track_file_collection[key] = filename
+
+    def start(self):
+        self.parse_collection()
+
+        set_interval(1, self.check_for_new_tracks)
+
+        print('Listening to Traktor...')
+        listener = TraktorListener(port=8000, quiet=True, custom_callback=self.update_meta)
+
+        listener.start()
+
+    def check_for_new_tracks(self):
+        global midi_client
+
+        if self.next_track_title_string is not None:
+            midi_client.note_on(self.skip_next_track_note, self.skip_next_track_channel, self.skip_next_track_velocity)
+
+            if self.light_on:
+                self.light_on = False
+                midi_client.note_off(self.new_track_available_note, self.new_track_available_channel)
+            else:
+                self.light_on = True
+                midi_client.note_on(self.new_track_available_note, self.new_track_available_channel,
+                                    self.new_track_available_velocity)
+        else:
+            self.light_on = False
+            midi_client.note_off(self.new_track_available_note, self.new_track_available_channel)
+            midi_client.note_off(self.skip_next_track_note, self.skip_next_track_channel)
+
+    def new_track_available(self, channel, note):
+        global twitter_client
+
+        if self.next_track_title_string is None:
+            return
+
+        self.current_track_title_string = self.next_track_title_string
+        self.next_track_title_string = None
+
+        self.current_track_artist_string = self.next_track_artist_string
+        self.next_track_artist_string = None
+
+        self.current_track_filename = self.next_track_filename
+        self.next_track_filename = None
+
+        update_track_string()
+        update_track_artwork()
+
+        twitter_client.update_status(self.current_track_title_string, self.current_track_artist_string)
+
+    def clear_current_track(self, channel, note):
+        global twitter_client
+
+        print('Clearing Track Name')
+
+        self.next_track_title_string = ''
+        self.current_track_title_string = self.next_track_title_string
+
+        self.next_track_artist_string = ''
+        self.current_track_artist_string = self.next_track_artist_string
+
+        self.next_track_filename = None
+        self.current_track_filename = self.next_track_filename
+
+        update_track_string()
+        update_track_artwork()
+
+        twitter_client.update_status(self.current_track_title_string, self.current_track_artist_string)
+
+    def skip_next_track(self, channel, note):
+        global twitter_client
+
+        if self.next_track_title_string is None:
+            return
+
+        print('Skipping Next Track')
+
+        self.next_track_title_string = None
+        self.next_track_artist_string = None
+        self.next_track_filename = None
+
+        update_track_string()
+        update_track_artwork()
+
+        twitter_client.update_status(self.current_track_title_string, self.current_track_artist_string)
+
+
+# -- Functions
 def call_at_interval(period, callback, args):
     while True:
         sleep(period)
@@ -97,373 +543,17 @@ def set_interval(period, callback, *args):
     Thread(target=call_at_interval, args=(period, callback, args)).start()
 
 
-def read_config():
-    global playing_track_title_filename
-    global playing_track_title_prefix
-    global playing_track_artist_filename
-    global playing_track_artist_prefix
-    global playing_track_artwork_filename
-    global no_artwork_placeholder_filename
-    global input_device_name
-    global output_device_name
-    global traktor_collection_path
-    global new_track_available_channel
-    global new_track_available_note
-    global new_track_available_velocity
-    global clear_current_track_note
-    global clear_current_track_channel
-    global skip_next_track_note
-    global skip_next_track_channel
-    global obs_server_address
-    global obs_server_port
-    global obs_server_password
-    global obs_scene_selection_notes
-    global obs_current_scene_channel
-    global obs_current_scene_velocity
-    global obs_stream_status_note
-    global obs_stream_status_channel
-    global obs_stream_status_on_velocity
-    global obs_stream_status_off_velocity
-    global twitter_bearer_token
-    global twitter_consumer_key
-    global twitter_consumer_secret
-    global twitter_access_token
-    global twitter_access_token_secret
-    global twitter_stream_start_text
-    global twitter_stream_stop_text
-    global twitter_track_update_text
-
-    print('Reading configuration...')
-
-    current_script_path = os.path.realpath(__file__)
-    config_file_path = Path(current_script_path).with_suffix('.ini')
-
-    config = configparser.ConfigParser()
-    config.read(config_file_path)
-
-    general = config['general']
-    playing_track_title_filename = general['OutputTitleFilename']
-    playing_track_title_prefix = general['OutputTitlePrefix']
-    playing_track_artist_filename = general['OutputArtistFilename']
-    playing_track_artist_prefix = general['OutputArtistPrefix']
-    playing_track_artwork_filename = general['OutputArtworkFilename']
-    no_artwork_placeholder_filename = general['NoArtworkPlaceHolderFilename']
-
-    midi = config['midi']
-    input_device_name = midi['InputDeviceName']
-    output_device_name = midi['OutputDeviceName']
-
-    traktor = config['traktor']
-    traktor_collection_path = Path(traktor['CollectionFilename'])
-    new_track_available_channel = int(
-        config['traktor']['NewTrackAvailableChannel']) - 1
-    new_track_available_note = int(traktor['NewTrackAvailableNote'])
-    new_track_available_velocity = int(traktor['NewTrackAvailableVelocity'])
-    clear_current_track_channel = int(traktor['ClearCurrentTrackChannel']) - 1
-    clear_current_track_note = int(traktor['ClearCurrentTrackNote'])
-    skip_next_track_channel = int(traktor['SkipNextTrackChannel']) - 1
-    skip_next_track_note = int(traktor['SkipNextTrackNote'])
-
-    obs = config['obs']
-    obs_server_address = obs['ObsServerAddress']
-    obs_server_port = int(obs['ObsServerPort'])
-    obs_server_password = obs['ObsServerPassword']
-    obs_current_scene_channel = int(obs['CurrentSceneChannel']) - 1
-    obs_current_scene_velocity = int(obs['CurrentSceneVelocity'])
-
-    for note in obs['SceneSelectionNotes'].split(','):
-        obs_scene_selection_notes.append(int(note))
-
-    obs_stream_status_note = int(obs['StreamStatusNote'])
-    obs_stream_status_channel = int(obs['StreamStatusChannel']) - 1
-    obs_stream_status_on_velocity = int(obs['StreamOnVelocity'])
-    obs_stream_status_off_velocity = int(obs['StreamOffVelocity'])
-
-    twitter = config['twitter']
-    twitter_bearer_token = twitter['BearerToken']
-    twitter_consumer_key = twitter['ConsumerKey']
-    twitter_consumer_secret = twitter['ConsumerSecret']
-    twitter_access_token = twitter['AccessToken']
-    twitter_access_token_secret = twitter['AccessTokenSecret']
-    twitter_stream_start_text = twitter['StreamStartText']
-    twitter_stream_stop_text = twitter['StreamStopText']
-    twitter_track_update_text = twitter['TrackUpdateText']
-
-
-def note_on(note, channel, velocity):
-    global midi_output
-
-    if midi_output is not None:
-        midi_output.send(mido.Message('note_on',
-                                      channel=channel,
-                                      note=note,
-                                      velocity=velocity))
-
-
-def note_off(note, channel):
-    global midi_output
-
-    if midi_output is not None:
-        midi_output.send(mido.Message('note_off',
-                                      channel=channel,
-                                      note=note))
-
-
-def update_obs_current_scene_index():
-    global obs
-    global obs_scenes
-    global obs_current_scene_index
-
-    current_scene = obs.call(obswebsocket.requests.GetCurrentScene())
-    obs_current_scene_index = obs_scenes.index(current_scene.getName())
-
-
-def set_obs_current_scene_note(on_or_off):
-    global obs_scene_selection_notes
-    global obs_current_scene_channel
-    global obs_current_scene_velocity
-    global obs_current_scene_index
-
-    if on_or_off:
-        note_on(channel=obs_current_scene_channel,
-                note=obs_scene_selection_notes[obs_current_scene_index],
-                velocity=obs_current_scene_velocity)
-    else:
-        note_off(channel=obs_current_scene_channel,
-                 note=obs_scene_selection_notes[obs_current_scene_index])
-
-
-def clear_obs_stream_status_note():
-    global obs_stream_status_note
-    global obs_stream_status_channel
-
-    note_off(channel=obs_stream_status_channel,
-             note=obs_stream_status_note)
-
-
-def update_obs_stream_status_note():
-    global obs_stream_on
-    global obs_stream_status_note
-    global obs_stream_status_channel
-    global obs_stream_status_on_velocity
-    global obs_stream_status_off_velocity
-
-    if obs_stream_on:
-        note_on(channel=obs_stream_status_channel,
-                note=obs_stream_status_note,
-                velocity=obs_stream_status_on_velocity)
-    else:
-        note_on(channel=obs_stream_status_channel,
-                note=obs_stream_status_note,
-                velocity=obs_stream_status_off_velocity)
-
-
-def on_obstransition(message):
-    global obs_in_transition
-
-    obs_in_transition = True
-
-
-def do_obs_scene_changed():
-    global obs_in_transition
-
-    set_obs_current_scene_note(False)
-    update_obs_current_scene_index()
-    set_obs_current_scene_note(True)
-
-    obs_in_transition = False
-
-
-def on_obs_scene_changed(message):
-    Thread(target=do_obs_scene_changed).start()
-
-
-def on_obs_streamstarted(message):
-    global obs_stream_on
-    global twitter_stream_start_text
-
-    obs_stream_on = True
-
-    update_obs_stream_status_note()
-    tweet(twitter_stream_start_text)
-
-    return
-
-
-def on_obs_streamstopped(message):
-    global obs_stream_on
-    global twitter_stream_stop
-
-    obs_stream_on = False
-
-    update_obs_stream_status_note()
-    tweet(twitter_stream_stop_text)
-
-    return
-
-
-def on_listening_midi_msg(message):
-    if(message.type != 'note_on'):
-        return
-
-    print(f'Note: {message.note} Channel: {message.channel + 1}')
-
-
-def on_midi_msg(message):
-    global obs
-    global obs_in_transition
-    global obs_scenes
-    global obs_current_scene_channel
-    global obs_scene_selection_notes
-    global obs_stream_status_note
-    global obs_stream_on
-    global next_track_title_string
-    global next_track_artist_string
-    global next_track_filename
-    global current_track_title_string
-    global current_track_artist_string
-    global current_track_filename
-    global new_track_available_channel
-    global new_track_available_note
-    global clear_current_track_channel
-    global clear_current_track_note
-    global skip_next_track_channel
-    global skip_next_track_note
-
-    if(message.type != 'note_on'):
-        return
-
-    if message.channel == new_track_available_channel and message.note == new_track_available_note:
-        if next_track_title_string is None:
-            return
-
-        current_track_title_string = next_track_title_string
-        next_track_title_string = None
-
-        current_track_artist_string = next_track_artist_string
-        next_track_artist_string = None
-
-        current_track_filename = next_track_filename
-        next_track_filename = None
-    elif message.channel == clear_current_track_channel and message.note == clear_current_track_note:
-        print('Clearing Track Name')
-
-        next_track_title_string = ''
-        current_track_title_string = next_track_title_string
-
-        next_track_artist_string = ''
-        current_track_artist_string = next_track_artist_string
-
-        next_track_filename = None
-        current_track_filename = next_track_filename
-    elif message.channel == skip_next_track_channel and message.note == skip_next_track_note:
-        if next_track_title_string is None:
-            return
-
-        print('Skipping Next Track')
-
-        next_track_title_string = None
-        next_track_artist_string = None
-        next_track_filename = None
-    elif message.channel == obs_stream_status_channel and message.note == obs_stream_status_note:
-        if obs_stream_on:
-            print('Set Stream OFF')
-            obs.call(obswebsocket.requests.StopStreaming())
-        else:
-            print('Set Stream ON')
-            obs.call(obswebsocket.requests.StartStreaming())
-
-        return
-    elif message.channel == obs_current_scene_channel and message.note in obs_scene_selection_notes:
-        if obs_in_transition:
-            return
-
-        scene_index = obs_scene_selection_notes.index(message.note)
-        if scene_index >= len(obs_scenes):
-            return
-
-        obs.call(obswebsocket.requests.SetCurrentScene(
-            obs_scenes[scene_index]))
-        return
-    else:
-        return
-
-    update_track_string()
-    update_track_artwork()
-    update_twitter_status()
-
-
-def setup_twitter():
-    global twitter_client
-    global twitter_bearer_token
-    global twitter_consumer_key
-    global twitter_consumer_secret
-    global twitter_access_token
-    global twitter_access_token_secret
-
-    print('Setting up Twitter...')
-
-    twitter_client = tweepy.Client(bearer_token=twitter_bearer_token,
-                                   consumer_key=twitter_consumer_key,
-                                   consumer_secret=twitter_consumer_secret,
-                                   access_token=twitter_access_token,
-                                   access_token_secret=twitter_access_token_secret)
-
-
-def tweet(text, media_id=None):
-    global twitter_client
-
-    if twitter_client is None:
-        return
-
-    # -- Update the status
-    print(f'Tweet!: {text}')
-    if media_id is None:
-        twitter_client.create_tweet(text=text)
-    else:
-        twitter_client.create_tweet(text=text, media_ids=[media_id])
-
-
-def update_twitter_status():
-    global twitter_track_update_text
-    global current_track_title_string
-    global current_track_artist_string
-    global playing_track_artwork_filename
-
-    if len(current_track_title_string) == 0 or len(current_track_title_string) == 0:
-        return
-
-    update_message = twitter_track_update_text.replace(
-        '{title}', current_track_title_string)
-    update_message = update_message.replace(
-        '{artist}', current_track_artist_string)
-
-    # media_id = None
-
-    # if os.path.exists(playing_track_artwork_filename):
-    #    base = os.path.splitext(playing_track_artwork_filename)[0]
-    #    extension = imghdr.what(playing_track_artwork_filename)
-
-    #    new_playing_track_artwork_filename = base + '.' + extension
-
-    #    with open(playing_track_artwork_filename, 'rb') as file:
-    #        media_id = API.simple_upload(new_playing_track_artwork_filename,
-    # file)
-
-    tweet(update_message)
-
-
 def update_track_artwork(need_placeholder_artwork=True):
-    global current_track_filename
+    global traktor_client
     global playing_track_artwork_filename
 
     artwork = None
 
-    if current_track_filename is not None:
-        if os.path.exists(current_track_filename):
+    if traktor_client.current_track_filename is not None:
+        if os.path.exists(traktor_client.current_track_filename):
             try:
                 # -- Mutagen can automatically detect format and type of tags
-                file = MutagenFile(current_track_filename)
+                file = MutagenFile(traktor_client.current_track_filename)
 
                 # -- Access APIC frame and grab the image
                 tag = file.tags.get('APIC:', None)
@@ -492,13 +582,14 @@ def update_track_artwork(need_placeholder_artwork=True):
 
 
 def update_track_string():
-    global current_track_title_string
-    global current_track_artist_string
+    global traktor_client
     global playing_track_title_filename
+    global playing_track_title_prefix
     global playing_track_artist_filename
+    global playing_track_artist_prefix
 
-    title = current_track_title_string
-    artist = current_track_artist_string
+    title = traktor_client.current_track_title_string
+    artist = traktor_client.current_track_artist_string
 
     if len(title) != 0 and playing_track_title_prefix is not None:
         title = playing_track_title_prefix + ' ' + title
@@ -512,180 +603,78 @@ def update_track_string():
     print(f'Output: {title} {artist}')
 
 
-def check_for_new_tracks():
-    global light_on
-    global midi_output
-    global next_track_title_string
-    global new_track_available_channel
-    global new_track_available_note
-    global new_track_available_velocity
-    global skip_next_track_channel
-    global skip_next_track_note
-    global skip_next_track_velocity
+def on_listening_midi_msg(message):
+    if(message.type != 'note_on'):
+        return
 
-    if next_track_title_string is not None:
-        note_on(skip_next_track_note,
-                skip_next_track_channel,
-                skip_next_track_velocity)
-
-        if midi_output is not None:
-            if light_on:
-                light_on = False
-                note_off(new_track_available_note, new_track_available_channel)
-            else:
-                light_on = True
-                note_on(new_track_available_note,
-                        new_track_available_channel,
-                        new_track_available_velocity)
-    else:
-        light_on = False
-        note_off(new_track_available_note, new_track_available_channel)
-        note_off(skip_next_track_note, skip_next_track_channel)
+    print(f'Note: {message.note} Channel: {message.channel + 1}')
 
 
-def update_traktor_meta(data):
-    global next_track_title_string
-    global next_track_artist_string
-    global next_track_filename
+def listen_to_midi(input_device_name):
+    print(f'Listening from "{input_device_name}".')
+
+    midi_input = mido.open_input(input_device_name, callback=on_listening_midi_msg)
+
+    if midi_input is not None:
+        try:
+            while 1:
+                sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+        midi_input.close()
+
+    sys.exit(2)
+
+
+def read_config(config_file_path):
+    global obs_client
+    global midi_client
+    global twitter_client
+    global traktor_client
+    global playing_track_title_filename
     global playing_track_title_prefix
+    global playing_track_artist_filename
     global playing_track_artist_prefix
-    global track_file_collection
+    global playing_track_artwork_filename
+    global no_artwork_placeholder_filename
 
-    info = dict(data)
-    title = info.get("title", "")
-    artist = info.get("artist", "")
+    print('Reading configuration...')
 
-    if len(title) == 0 or len(artist) == 0:
-        return
+    if not os.path.exists(config_file_path):
+        print(f'Can\'t read ini file at \'{config_file_path}\'.')
+        sys.exit(2)
 
-    track_string = f'{title}{artist}'
-    next_track_title_string = title
-    next_track_artist_string = artist
+    config = configparser.ConfigParser()
+    config.read(config_file_path)
 
-    print(f'Available: {title} {artist}')
+    general = config['general']
+    playing_track_title_filename = general['OutputTitleFilename']
+    playing_track_title_prefix = general['OutputTitlePrefix']
+    playing_track_artist_filename = general['OutputArtistFilename']
+    playing_track_artist_prefix = general['OutputArtistPrefix']
+    playing_track_artwork_filename = general['OutputArtworkFilename']
+    no_artwork_placeholder_filename = general['NoArtworkPlaceHolderFilename']
 
-    next_track_filename = track_file_collection.get(track_string, None)
-
-
-def setup_obs():
-    global obs
-    global obs_scenes
-    global obs_stream_on
-    global obs_server_address
-    global obs_server_port
-    global obs_server_password
-
-    print('Setting up OBS...')
-
-    obs = obswebsocket.obsws(obs_server_address,
-                             obs_server_port,
-                             obs_server_password)
-    obs.register(on_obstransition, obswebsocket.events.TransitionBegin)
-    obs.register(on_obs_scene_changed, obswebsocket.events.TransitionEnd)
-    obs.register(on_obs_streamstarted, obswebsocket.events.StreamStarted)
-    obs.register(on_obs_streamstopped, obswebsocket.events.StreamStopped)
-
-    try:
-        obs.connect()
-    except obswebsocket.exceptions.ConnectionFailure:
-        obs = None
-        return
-
-    # -- Get all the scenes
-    all_scenes = obs.call(obswebsocket.requests.GetSceneList())
-    for s in all_scenes.getScenes():
-        obs_scenes.append(s['name'])
-
-    # -- Update the current scene
-    update_obs_current_scene_index()
-    set_obs_current_scene_note(True)
-
-    # -- Update the initial stream status
-    status = obs.call(obswebsocket.requests.GetStreamingStatus())
-    obs_stream_on = status.getStreaming()
-
-    update_obs_stream_status_note()
-
-
-def setup_midi():
-    global midi_input
-    global midi_output
-    global input_device_name
-    global output_device_name
-
-    print('Setting up midi...')
-
-    if input_device_name is not None:
-        for device_name in mido.get_input_names():
-            if device_name == input_device_name:
-                midi_input = mido.open_input(device_name, callback=on_midi_msg)
-                print(f'Input: {device_name}')
-                break
-
-    if output_device_name is not None:
-        for device_name in mido.get_output_names():
-            if device_name == output_device_name:
-                midi_output = mido.open_output(device_name)
-                print(f'Output: {device_name}')
-                break
-
-
-def parse_traktor_collection():
-    global track_file_collection
-    global traktor_collection_path
-
-    print('Parsing Traktor collection...')
-
-    xml_root = xml_tree.ElementTree(file=traktor_collection_path).getroot()
-
-    for collection in xml_root.findall('COLLECTION'):
-        for entry in collection.findall('ENTRY'):
-            location = entry.find('LOCATION')
-
-            if location is None:
-                continue
-
-            volume = location.get('VOLUME')
-
-            if volume is None:
-                continue
-
-            directory = location.get('DIR')
-
-            if directory is None:
-                continue
-
-            file = location.get('FILE')
-
-            if file is None:
-                continue
-
-            filename = '/Volumes/' + volume + \
-                directory.replace('/:', '/') + file
-
-            title = entry.get('TITLE')
-
-            if title is None:
-                continue
-
-            artist = entry.get('ARTIST')
-
-            if artist is None:
-                continue
-
-            key = f'{title}{artist}'
-
-            if key not in track_file_collection:
-                track_file_collection[key] = filename
+    midi_client = MidiClient(config['midi'])
+    traktor_client = TraktorClient(config['traktor'])
+    obs_client = OBSClient(config['obs'])
+    twitter_client = TwitterClient(config['twitter'])
 
 
 def read_args(args):
-    global midi_input
-    global midi_output
+    config_file_path = None
 
     try:
         # -- Gather the arguments
-        opts, arg = getopt.getopt(args, 'dl:')
+        opts, other_arguments = getopt.getopt(args, 'dl:')
+
+        for argument in other_arguments:
+            if config_file_path is not None:
+                print('Found multiple ini files on the command line.')
+                sys.exit(2)
+
+            config_file_path = argument
 
         if len(opts):
             # -- Iterate over the options and values
@@ -697,76 +686,38 @@ def read_args(args):
                     print(f'{mido.get_output_names()}')
                     sys.exit(2)
                 elif opt == '-l':
-                    print(f'Listening from "{arg_val}".')
+                    listen_to_midi(arg_val)
 
-                    midi_input = mido.open_input(arg_val,
-                                                 callback=on_listening_midi_msg)
-                    if midi_input is not None:
-                        try:
-                            while 1:
-                                sleep(1)
-                        except KeyboardInterrupt:
-                            pass
-
-                        if midi_input is not None:
-                            midi_input.close()
-
-                    sys.exit(2)
     except getopt.GetoptError:
-        print('usage: args_demo.py <-devices> <-listen>')
+        print('usage: StreamManager.py <-devices> <-listen> config.ini')
         sys.exit(2)
+
+    if config_file_path is None:
+        print('Couldn\'t find any ini file path on the command line.')
+        sys.exit(2)
+
+    return config_file_path
 
 
 def shutdown():
-    global obs
-    global obs_stream_on
-    global midi_input
-    global midi_output
-    global new_track_available_note
-    global new_track_available_channel
-    global skip_next_track_note
-    global skip_next_track_channel
+    global midi_client
+    global obs_client
 
-    if obs is not None:
-        clear_obs_stream_status_note()
-
-        set_obs_current_scene_note(False)
-
-        obs.disconnect()
-
-    if midi_input is not None:
-        midi_input.close()
-
-    if midi_output is not None:
-        if new_track_available_note:
-            note_off(new_track_available_note, new_track_available_channel)
-            note_off(skip_next_track_note, skip_next_track_channel)
-
-            # -- Give some time for the note off to be sent thru
-            sleep(5)
-
-        midi_output.close()
+    midi_client.shutdown()
+    obs_client.shutdown()
 
 
 def main():
-    # -- Remove the first argument (the filename)
-    read_args(sys.argv[1:])
+    global traktor_client
 
-    read_config()
+    # -- Remove the first argument (which is the script filename)
+    config_file_path = read_args(sys.argv[1:])
+    read_config(config_file_path)
+
     update_track_string()
     update_track_artwork(False)
-    set_interval(1, check_for_new_tracks)
-    setup_midi()
-    setup_obs()
-    setup_twitter()
-    parse_traktor_collection()
 
-    print('Listening to Traktor...')
-    listener = TraktorListener(port=8000,
-                               quiet=True,
-                               custom_callback=update_traktor_meta)
-
-    listener.start()
+    traktor_client.start()
 
 
 if __name__ == '__main__':
