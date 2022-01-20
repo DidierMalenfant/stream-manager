@@ -46,13 +46,6 @@ obs_client = None
 twitter_client = None
 traktor_client = None
 
-playing_track_title_filename = None
-playing_track_title_prefix = None
-playing_track_artist_filename = None
-playing_track_artist_prefix = None
-playing_track_artwork_filename = None
-no_artwork_placeholder_filename = None
-
 
 # -- Classes
 class TwitterClient:
@@ -71,6 +64,7 @@ class TwitterClient:
         self.stream_start_text = config['StreamStartText']
         self.stream_stop_text = config['StreamStopText']
         self.track_update_text = config['TrackUpdateText']
+        self.track_update_no_label_text = config['TrackUpdateNoLabelText']
 
         self.twitter_api = tweepy.Client(bearer_token=self.bearer_token, consumer_key=self.consumer_key,
                                          consumer_secret=self.consumer_secret, access_token=self.access_token,
@@ -96,27 +90,33 @@ class TwitterClient:
         """Tweet the stream strop text."""
         self.tweet(self.twitter_stream_stop_text)
 
-    def update_status(self, title, artist):
+    def update_status(self, title, artist, label):
         """Tweet the currently playing track."""
         # global playing_track_artwork_filename
 
         if len(title) == 0 or len(artist) == 0:
             return
 
-        update_message = self.track_update_text.replace('{title}', title)
-        update_message = update_message.replace('{artist}', artist)
+        if len(label) == 0:
+            update_message = self.track_update_no_label_text.replace('{title}', title)
+            update_message = update_message.replace('{artist}', artist)
+        else:
+            update_message = self.track_update_text.replace('{title}', title)
+            update_message = update_message.replace('{artist}', artist)
+            update_message = update_message.replace('{label}', label)
 
-        # media_id = None
+            # -- Posting media requires Twitter API V1 access
+            # media_id = None
 
-        # if os.path.exists(playing_track_artwork_filename):
-        #    base = os.path.splitext(playing_track_artwork_filename)[0]
-        #    extension = imghdr.what(playing_track_artwork_filename)
+            # if os.path.exists(playing_track_artwork_filename):
+            #    base = os.path.splitext(playing_track_artwork_filename)[0]
+            #    extension = imghdr.what(playing_track_artwork_filename)
 
-        #    new_playing_track_artwork_filename = base + '.' + extension
+            #    new_playing_track_artwork_filename = base + '.' + extension
 
-        #    with open(playing_track_artwork_filename, 'rb') as file:
-        #        media_id = API.simple_upload(new_playing_track_artwork_filename,
-        # file)
+            #    with open(playing_track_artwork_filename, 'rb') as file:
+            #        media_id = API.simple_upload(new_playing_track_artwork_filename,
+            # file)
 
         self.tweet(update_message)
 
@@ -374,6 +374,14 @@ class TraktorClient:
 
         print('Setting up Traktor...')
 
+        self.playing_track_title_filename = config['OutputTitleFilename']
+        self.playing_track_title_prefix = config['OutputTitlePrefix']
+        self.playing_track_artist_filename = config['OutputArtistFilename']
+        self.playing_track_artist_prefix = config['OutputArtistPrefix']
+        self.playing_track_label_filename = config['OutputLabelFilename']
+        self.playing_track_label_prefix = config['OutputLabelPrefix']
+        self.playing_track_artwork_filename = config['OutputArtworkFilename']
+        self.no_artwork_placeholder_filename = config['NoArtworkPlaceHolderFilename']
         self.collection_path = Path(config['CollectionFilename'])
         self.new_track_available_channel = int(config['NewTrackAvailableChannel']) - 1
         self.new_track_available_note = int(config['NewTrackAvailableNote'])
@@ -386,9 +394,11 @@ class TraktorClient:
 
         self.next_track_title_string = None
         self.next_track_artist_string = None
+        self.next_track_label_string = None
         self.next_track_filename = None
         self.current_track_title_string = ''
         self.current_track_artist_string = ''
+        self.current_track_label_string = ''
         self.current_track_filename = None
         self.light_on = False
         self.track_file_collection = {}
@@ -417,7 +427,13 @@ class TraktorClient:
 
         print(f'Available: {title} {artist}')
 
-        self.next_track_filename = self.track_file_collection.get(track_string, None)
+        track_info = self.track_file_collection.get(track_string, None)
+        if track_info is None:
+            self.next_track_filename = None
+            self.next_track_label_string = ''
+        else:
+            self.next_track_filename = track_info[0]
+            self.next_track_label_string = track_info[1]
 
     def parse_collection(self):
         print('Parsing Traktor collection...')
@@ -461,8 +477,17 @@ class TraktorClient:
 
                 key = f'{title}{artist}'
 
+                label = ''
+                info = entry.find('INFO')
+
+                if info is not None:
+                    found_label = info.get('LABEL')
+
+                    if found_label is not None:
+                        label = found_label
+
                 if key not in self.track_file_collection:
-                    self.track_file_collection[key] = filename
+                    self.track_file_collection[key] = [filename, label]
 
     def start(self):
         self.parse_collection()
@@ -504,13 +529,18 @@ class TraktorClient:
         self.current_track_artist_string = self.next_track_artist_string
         self.next_track_artist_string = None
 
+        self.current_track_label_string = self.next_track_label_string
+        self.next_track_label_string = None
+
         self.current_track_filename = self.next_track_filename
         self.next_track_filename = None
 
         update_track_string()
         update_track_artwork()
 
-        twitter_client.update_status(self.current_track_title_string, self.current_track_artist_string)
+        twitter_client.update_status(self.current_track_title_string,
+                                     self.current_track_artist_string,
+                                     self.current_track_label_string)
 
     def clear_current_track(self, channel, note):
         global twitter_client
@@ -523,13 +553,18 @@ class TraktorClient:
         self.next_track_artist_string = ''
         self.current_track_artist_string = self.next_track_artist_string
 
+        self.next_track_label_string = ''
+        self.current_track_label_string = self.next_track_label_string
+
         self.next_track_filename = None
         self.current_track_filename = self.next_track_filename
 
         update_track_string()
         update_track_artwork()
 
-        twitter_client.update_status(self.current_track_title_string, self.current_track_artist_string)
+        twitter_client.update_status(self.current_track_title_string,
+                                     self.current_track_artist_string,
+                                     self.current_track_label_string)
 
     def skip_next_track(self, channel, note):
         global twitter_client
@@ -541,12 +576,15 @@ class TraktorClient:
 
         self.next_track_title_string = None
         self.next_track_artist_string = None
+        self.next_track_label_string = None
         self.next_track_filename = None
 
         update_track_string()
         update_track_artwork()
 
-        twitter_client.update_status(self.current_track_title_string, self.current_track_artist_string)
+        twitter_client.update_status(self.current_track_title_string,
+                                     self.current_track_artist_string,
+                                     self.current_track_label_string)
 
 
 # -- Functions
@@ -562,7 +600,6 @@ def set_interval(period, callback, *args):
 
 def update_track_artwork(need_placeholder_artwork=True):
     global traktor_client
-    global playing_track_artwork_filename
 
     artwork = None
 
@@ -586,38 +623,43 @@ def update_track_artwork(need_placeholder_artwork=True):
 
             if artwork is not None:
                 # -- Write artwork to new image
-                with open(playing_track_artwork_filename, 'wb') as dest_file:
+                with open(traktor_client.playing_track_artwork_filename, 'wb') as dest_file:
                     dest_file.write(artwork)
                     need_placeholder_artwork = False
 
     if need_placeholder_artwork:
-        with open(no_artwork_placeholder_filename, 'rb') as src_file:
-            with open(playing_track_artwork_filename, 'wb') as dest_file:
+        with open(traktor_client.no_artwork_placeholder_filename, 'rb') as src_file:
+            with open(traktor_client.playing_track_artwork_filename, 'wb') as dest_file:
                 dest_file.write(src_file.read())
-    elif not artwork and os.path.exists(playing_track_artwork_filename):
-        os.remove(playing_track_artwork_filename)
+    elif not artwork and os.path.exists(traktor_client.playing_track_artwork_filename):
+        os.remove(traktor_client.playing_track_artwork_filename)
 
 
 def update_track_string():
     global traktor_client
-    global playing_track_title_filename
-    global playing_track_title_prefix
-    global playing_track_artist_filename
-    global playing_track_artist_prefix
 
     title = traktor_client.current_track_title_string
+
+    if len(title) != 0 and traktor_client.playing_track_title_prefix is not None:
+        title = traktor_client.playing_track_title_prefix + ' ' + title
+
+    Path(traktor_client.playing_track_title_filename).write_text(f'{title}')
+
     artist = traktor_client.current_track_artist_string
 
-    if len(title) != 0 and playing_track_title_prefix is not None:
-        title = playing_track_title_prefix + ' ' + title
+    if len(artist) != 0 and traktor_client.playing_track_artist_prefix is not None:
+        artist = traktor_client.playing_track_artist_prefix + ' ' + artist
 
-    if len(artist) != 0 and playing_track_artist_prefix is not None:
-        artist = playing_track_artist_prefix + ' ' + artist
+    Path(traktor_client.playing_track_artist_filename).write_text(f'{artist}')
 
-    Path(playing_track_title_filename).write_text(f'{title}')
-    Path(playing_track_artist_filename).write_text(f'{artist}')
+    label = traktor_client.current_track_label_string
 
-    print(f'Output: {title} {artist}')
+    if len(label) != 0 and traktor_client.playing_track_label_prefix is not None:
+        label = traktor_client.playing_track_label_prefix + ' ' + label
+
+    Path(traktor_client.playing_track_label_filename).write_text(f'{label}')
+
+    print(f'Output: {title} {artist} {label}')
 
 
 def on_listening_midi_msg(message):
@@ -649,12 +691,6 @@ def read_config(config_file_path):
     global midi_client
     global twitter_client
     global traktor_client
-    global playing_track_title_filename
-    global playing_track_title_prefix
-    global playing_track_artist_filename
-    global playing_track_artist_prefix
-    global playing_track_artwork_filename
-    global no_artwork_placeholder_filename
 
     print('Reading configuration...')
 
@@ -664,14 +700,6 @@ def read_config(config_file_path):
 
     config = configparser.ConfigParser()
     config.read(config_file_path)
-
-    general = config['general']
-    playing_track_title_filename = general['OutputTitleFilename']
-    playing_track_title_prefix = general['OutputTitlePrefix']
-    playing_track_artist_filename = general['OutputArtistFilename']
-    playing_track_artist_prefix = general['OutputArtistPrefix']
-    playing_track_artwork_filename = general['OutputArtworkFilename']
-    no_artwork_placeholder_filename = general['NoArtworkPlaceHolderFilename']
 
     midi_client = MidiClient(config['midi'])
     traktor_client = TraktorClient(config['traktor'])
