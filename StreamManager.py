@@ -84,11 +84,11 @@ class TwitterClient:
 
     def tweet_start_text(self):
         """Tweet the stream start text."""
-        self.tweet(self.twitter_stream_start_text)
+        self.tweet(self.stream_start_text)
 
     def tweet_stop_text(self):
         """Tweet the stream strop text."""
-        self.tweet(self.twitter_stream_stop_text)
+        self.tweet(self.stream_stop_text)
 
     def update_status(self, title, artist, label):
         """Tweet the currently playing track."""
