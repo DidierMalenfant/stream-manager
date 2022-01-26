@@ -66,21 +66,21 @@ class TwitterClient:
         self.track_update_text = config['TrackUpdateText']
         self.track_update_no_label_text = config['TrackUpdateNoLabelText']
 
-        self.twitter_api = tweepy.Client(bearer_token=self.bearer_token, consumer_key=self.consumer_key,
-                                         consumer_secret=self.consumer_secret, access_token=self.access_token,
-                                         access_token_secret=self.access_token_secret)
+        self.api = tweepy.Client(bearer_token=self.bearer_token, consumer_key=self.consumer_key,
+                                 consumer_secret=self.consumer_secret, access_token=self.access_token,
+                                 access_token_secret=self.access_token_secret)
 
     def tweet(self, text, media_id=None):
         """Tweet some text."""
-        if self.twitter_api is None:
+        if self.api is None:
             return
 
         # -- Update the status
         print(f'Tweet!: {text}')
         if media_id is None:
-            self.twitter_api.create_tweet(text=text)
+            self.api.create_tweet(text=text)
         else:
-            self.twitter_api.create_tweet(text=text, media_ids=[media_id])
+            self.api.create_tweet(text=text, media_ids=[media_id])
 
     def tweet_start_text(self):
         """Tweet the stream start text."""
