@@ -299,11 +299,11 @@ class OBSClient:
             midi_client.note_on(channel=self.stream_status_channel, note=self.stream_status_note,
                                 velocity=self.stream_status_off_velocity)
 
-    def start_streaming(self, channel, note):
+    def start_streaming(self):
         print('Set Stream ON')
         self.obs.call(obswebsocket.requests.StartStreaming())
 
-    def stop_streaming(self, channel, note):
+    def stop_streaming(self):
         print('Set Stream OFF')
         self.obs.call(obswebsocket.requests.StopStreaming())
 
