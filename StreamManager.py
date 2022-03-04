@@ -3,7 +3,7 @@
 # DPRStreamManager
 # Copyright 2021-2011 by Didier Malenfant.
 #
-# A little swiss army knife script used to listen to tracks being played
+# A little Swiss army knife script used to listen to tracks being played
 # in Traktor, control OBS via midi and post track lists to Twitter.
 #
 # This program is free software: you can redistribute it and/or modify
@@ -87,7 +87,7 @@ class TwitterClient:
         self.tweet(self.stream_start_text)
 
     def tweet_stop_text(self):
-        """Tweet the stream strop text."""
+        """Tweet the stream stop text."""
         self.tweet(self.stream_stop_text)
 
     def update_status(self, title, artist, label):
