@@ -20,25 +20,31 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import os
-import mido
+# TODO: Add back support for V2 API tweeting
+# self.bearer_token = config['BearerToken']
+# self.api = tweepy.Client(bearer_token=self.bearer_token, consumer_key=self.consumer_key,
+#                         consumer_secret=self.consumer_secret, access_token=self.access_token,
+#                         access_token_secret=self.access_token_secret)
+# TODO: Document code.
+# TODO: Better error handling.
+# TODO: If no midi device is present just post new tracks right away.
+
 import configparser
 import getopt
+import os
 import sys
-import tweepy
-# import imghdr
+import xml.etree.ElementTree as xml_tree
+from pathlib import Path
+from threading import Thread
+from time import sleep
 
+import mido
 import obswebsocket
 import obswebsocket.events
 import obswebsocket.requests
-import xml.etree.ElementTree as xml_tree
-
-from pathlib import Path
-from traktor_nowplaying import Listener as TraktorListener
-from threading import Thread
-from time import sleep
+import tweepy
 from mutagen import File as MutagenFile
-
+from traktor_nowplaying import Listener as TraktorListener
 
 # -- Global variables
 midi_client = None
@@ -56,7 +62,6 @@ class TwitterClient:
 
         print('Setting up Twitter...')
 
-        self.bearer_token = config['BearerToken']
         self.consumer_key = config['ConsumerKey']
         self.consumer_secret = config['ConsumerSecret']
         self.access_token = config['AccessToken']
@@ -65,39 +70,73 @@ class TwitterClient:
         self.stream_stop_text = config['StreamStopText']
         self.track_update_text = config['TrackUpdateText']
         self.track_update_no_label_text = config['TrackUpdateNoLabelText']
+        self.last_tweet_status_id = None
 
-        self.api = tweepy.Client(bearer_token=self.bearer_token, consumer_key=self.consumer_key,
-                                 consumer_secret=self.consumer_secret, access_token=self.access_token,
-                                 access_token_secret=self.access_token_secret)
+        auth = tweepy.OAuthHandler(self.consumer_key, self.consumer_secret)
+        auth.set_access_token(self.access_token, self.access_token_secret)
+        self.api = tweepy.API(auth)
 
-    def tweet(self, text, media_id=None):
-        """Tweet some text."""
+    def tweet(self, text, in_reply_to=None, media_filename=None):
+        """Tweet some text.
+
+        Parameters
+        ----------
+        text : str
+            Text of the status to post.
+        in_reply_to : Optional[str]
+            Optional status ID of a tweet to reply to.
+        media_filename : Optional[str]
+            Optional filename of an image to post as media.
+
+        Returns
+        -------
+        str
+            Status ID of the tweet posted or None if something went wrong.
+        """
+
         if self.api is None:
-            return
+            return None
+
+        result = None
+        media_ids = None
 
         # -- Update the status
-        print(f'Tweet!: {text}')
-        if media_id is None:
-            self.api.create_tweet(text=text)
-        else:
-            self.api.create_tweet(text=text, media_ids=[media_id])
+        try:
+            if media_filename is not None and os.path.exists(media_filename):
+                # -- Posting media requires elevated Twitter API access (because it uses V1 api)
+                file = open(media_filename, 'rb')
+                media = self.api.media_upload(filename=media_filename, file=file)
+                file.close()
+
+                media_ids = [media.media_id_string]
+
+            result = self.api.update_status(status=text,
+                                            in_reply_to_status_id=in_reply_to,
+                                            media_ids=media_ids)
+
+            print(f'Tweet!: {text}')
+        except Exception:
+            print(f'Error tweeting!: {text}')
+            return None
+
+        return result.id_str
 
     def tweet_start_text(self):
         """Tweet the stream start text."""
-        self.tweet(self.stream_start_text)
+        self.last_tweet_status_id = self.tweet(self.stream_start_text)
 
     def tweet_stop_text(self):
         """Tweet the stream stop text."""
         self.tweet(self.stream_stop_text)
+        self.last_tweet_status_id = None
 
-    def update_status(self, title, artist, label):
+    def update_status(self, title, artist, label=None, artwork_filename=None):
         """Tweet the currently playing track."""
-        # global playing_track_artwork_filename
 
         if len(title) == 0 or len(artist) == 0:
             return
 
-        if len(label) == 0:
+        if label is None or len(label) == 0:
             update_message = self.track_update_no_label_text.replace('{title}', title)
             update_message = update_message.replace('{artist}', artist)
         else:
@@ -105,20 +144,9 @@ class TwitterClient:
             update_message = update_message.replace('{artist}', artist)
             update_message = update_message.replace('{label}', label)
 
-            # -- Posting media requires Twitter API V1 access
-            # media_id = None
-
-            # if os.path.exists(playing_track_artwork_filename):
-            #    base = os.path.splitext(playing_track_artwork_filename)[0]
-            #    extension = imghdr.what(playing_track_artwork_filename)
-
-            #    new_playing_track_artwork_filename = base + '.' + extension
-
-            #    with open(playing_track_artwork_filename, 'rb') as file:
-            #        media_id = API.simple_upload(new_playing_track_artwork_filename,
-            # file)
-
-        self.tweet(update_message)
+        self.last_tweet_status_id = self.tweet(text=update_message,
+                                               media_filename=artwork_filename,
+                                               in_reply_to=self.last_tweet_status_id)
 
 
 class MidiClient:
@@ -540,7 +568,8 @@ class TraktorClient:
 
         twitter_client.update_status(self.current_track_title_string,
                                      self.current_track_artist_string,
-                                     self.current_track_label_string)
+                                     self.current_track_label_string,
+                                     self.current_track_filename)
 
     def clear_current_track(self, channel, note):
         global twitter_client
@@ -560,11 +589,7 @@ class TraktorClient:
         self.current_track_filename = self.next_track_filename
 
         update_track_string()
-        update_track_artwork()
-
-        twitter_client.update_status(self.current_track_title_string,
-                                     self.current_track_artist_string,
-                                     self.current_track_label_string)
+        update_track_artwork(False)
 
     def skip_next_track(self, channel, note):
         global twitter_client
@@ -581,10 +606,6 @@ class TraktorClient:
 
         update_track_string()
         update_track_artwork()
-
-        twitter_client.update_status(self.current_track_title_string,
-                                     self.current_track_artist_string,
-                                     self.current_track_label_string)
 
 
 # -- Functions
