@@ -170,7 +170,7 @@ class OBSClient:
     def shutdown(self):
         print('Shutting down obs...')
 
-        if self.obs is None:
-            return
+        if self.obs is not None:
+            self.obs.disconnect()
 
-        self.obs.disconnect()
+            self.obs = None
