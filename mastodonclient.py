@@ -83,16 +83,16 @@ class MastodonClient:
 
         return result["id"]
 
-    def toot_start_text(self):
+    def post_start_text(self):
         """Toot the stream start text."""
         self.last_toot_status_id = self.toot(self.stream_start_text)
 
-    def toot_stop_text(self):
+    def post_stop_text(self):
         """Toot the stream stop text."""
         self.toot(self.stream_stop_text, in_reply_to=self.last_toot_status_id)
         self.last_toot_status_id = None
 
-    def update_status(self, title, artist, label=None, artwork_filename=None):
+    def post_status(self, title, artist, label=None, artwork_filename=None):
         """Toot the currently playing track."""
 
         if len(title) == 0 or len(artist) == 0:

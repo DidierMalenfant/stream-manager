@@ -272,10 +272,10 @@ class TraktorClient:
         self.update_track_artwork()
 
         for client in self.post_clients:
-            client.update_status(self.current_track_title_string,
-                                 self.current_track_artist_string,
-                                 self.current_track_label_string,
-                                 self.playing_track_artwork_filename)
+            client.post_status(self.current_track_title_string,
+                               self.current_track_artist_string,
+                               self.current_track_label_string,
+                               self.playing_track_artwork_filename)
 
     def clear_current_track(self, channel, note):
         print('Clearing Track Name')

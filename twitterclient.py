@@ -96,16 +96,16 @@ class TwitterClient:
 
         return result.id_str
 
-    def tweet_start_text(self):
+    def post_start_text(self):
         """Tweet the stream start text."""
         self.last_tweet_status_id = self.tweet(self.stream_start_text)
 
-    def tweet_stop_text(self):
+    def post_stop_text(self):
         """Tweet the stream stop text."""
         self.tweet(self.stream_stop_text, in_reply_to=self.last_tweet_status_id)
         self.last_tweet_status_id = None
 
-    def update_status(self, title, artist, label=None, artwork_filename=None):
+    def post_status(self, title, artist, label=None, artwork_filename=None):
         """Tweet the currently playing track."""
 
         if len(title) == 0 or len(artist) == 0:

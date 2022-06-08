@@ -153,7 +153,7 @@ class OBSClient:
         self.update_stream_status_note()
 
         for client in self.post_clients:
-            client.tweet_start_text()
+            client.post_start_text()
 
         return
 
@@ -163,7 +163,7 @@ class OBSClient:
         self.update_stream_status_note()
 
         for client in self.post_clients:
-            client.tweet_stop_text()
+            client.post_stop_text()
 
         return
 
